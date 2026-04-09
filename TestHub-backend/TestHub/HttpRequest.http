@@ -1,0 +1,29 @@
+POST http://localhost:8080/api/runs
+Content-Type: application/json
+
+{"projectId":1,"mode":"SUITE"}
+
+
+###
+
+POST http://localhost:8080/api/projects
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="name"
+
+My Project
+--WebAppBoundary
+Content-Disposition: form-data; name="description"
+
+Sample project
+--WebAppBoundary
+Content-Disposition: form-data; name="testsDir"
+
+Tests
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="eforex_im_gc_qa.zip"
+Content-Type: application/zip
+
+< C:/Users/doyetunde/Workspace/guce_project/eforex_im_gc_qa/eforex_im_gc_qa.zip
+--WebAppBoundary--

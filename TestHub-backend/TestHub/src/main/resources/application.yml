@@ -1,0 +1,55 @@
+spring:
+  application:
+    name: TestHub
+
+  # ── Base de données H2 embarquée (dev) ──────────────────────────────────────
+  datasource:
+    url: jdbc:h2:file:./data/testhub;AUTO_SERVER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+
+  h2:
+    console:
+      enabled: true
+      path: /h2-console   # http://localhost:8080/h2-console
+
+  jpa:
+    hibernate:
+      ddl-auto: update    # crée/met à jour les tables automatiquement
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+        format_sql: true
+
+  # ── Upload ZIP (50 Mo max) ───────────────────────────────────────────────────
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 50MB
+      max-request-size: 50MB
+
+server:
+  port: 8080
+
+# ── Configuration spécifique à la plateforme ────────────────────────────────
+robot:
+  storage:
+    # Dossier où seront stockés les projets extraits
+    projects-dir: ./storage/projects
+    # Dossier où seront stockés les rapports générés
+    reports-dir: ./storage/reports
+
+  python:
+    # Chemin vers l'exécutable Python système (utilisé pour créer les venvs)
+    # Windows : C:/Python311/python.exe
+    # Linux/Mac : /usr/bin/python3
+#    executable: python3
+    executable: python
+
+  execution:
+    # Timeout maximum par run (secondes)
+    timeout-seconds: 600
+    # Dossiers à exclure lors de l'extraction du ZIP
+    excluded-dirs: venv,__pycache__,Results,pabot_results,.git,node_modules
