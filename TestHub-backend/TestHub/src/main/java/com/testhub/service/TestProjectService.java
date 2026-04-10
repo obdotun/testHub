@@ -4,6 +4,7 @@ import com.testhub.config.StorageConfig;
 import com.testhub.dto.RobotFileDto;
 import com.testhub.dto.TestProjectDto;
 import com.testhub.entity.TestProject;
+import com.testhub.enums.ProjectSource;
 import com.testhub.enums.RunStatus;
 import com.testhub.enums.VenvStatus;
 import com.testhub.repository.RobotFileRepository;
@@ -18,6 +19,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.nio.file.*;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -34,71 +36,188 @@ public class TestProjectService {
     private final ZipExtractorService   zipExtractor;
     private final ProjectIndexerService indexer;
     private final VenvSetupService      venvSetup;
+    private final GitService            gitService;
 
-    /**
-     * Crée un projet à partir d'un ZIP uploadé.
-     * Enchaîne : extraction → indexation → setup venv (async).
-     */
+    // ── Création via ZIP ─────────────────────────────────────────────────────
+
     @Transactional
     public TestProjectDto.Response createFromZip(
-            TestProjectDto.CreateRequest req, MultipartFile zipFile) throws IOException {
+            TestProjectDto.CreateZipRequest req, MultipartFile zipFile) throws IOException {
 
-        if (projectRepository.existsByName(req.getName())) {
-            throw new IllegalArgumentException(
-                    "Un projet nommé '" + req.getName() + "' existe déjà.");
-        }
+        validateName(req.getName());
         if (!isZip(zipFile)) {
-            throw new IllegalArgumentException(
-                    "Le fichier doit être un ZIP valide.");
+            throw new IllegalArgumentException("Le fichier doit être un ZIP valide.");
         }
 
-        // Créer le dossier de stockage
-        String safeName = req.getName().replaceAll("[^a-zA-Z0-9_\\-]", "_");
-        Path projectPath = storageConfig.getProjectsPath().resolve(safeName);
-        Files.createDirectories(projectPath);
-
-        // Extraire le ZIP (sans venv/, Results/, etc.)
+        Path projectPath = initProjectDir(req.getName());
         int extracted = zipExtractor.extract(zipFile.getInputStream(), projectPath);
-        log.info("Projet '{}' : {} fichiers extraits", req.getName(), extracted);
+        log.info("Projet '{}' : {} fichiers extraits depuis ZIP", req.getName(), extracted);
 
-        // Détecter si le ZIP avait un dossier racine (ex: eforex_im_gc_qa/)
-        // et ajuster le storagePath si nécessaire
         Path effectivePath = detectRootDir(projectPath);
 
-        // Persister le projet
         TestProject project = TestProject.builder()
                 .name(req.getName())
                 .description(req.getDescription())
                 .storagePath(effectivePath.toString())
                 .originalZipName(zipFile.getOriginalFilename())
                 .testsDir(req.getTestsDir() != null ? req.getTestsDir() : "Tests")
+                .source(ProjectSource.ZIP)
+                .venvStatus(VenvStatus.NONE)
+                .build();
+
+        project = projectRepository.save(project);
+        indexer.indexProject(project);
+        return toResponse(project);
+    }
+
+    // ── Création via Bitbucket ────────────────────────────────────────────────
+
+    @Transactional
+    public TestProjectDto.Response createFromGit(
+            TestProjectDto.CreateGitRequest req) throws IOException {
+
+        validateName(req.getName());
+
+        Path projectPath = initProjectDir(req.getName());
+
+        // Masquer les credentials dans l'URL stockée en base
+        String publicUrl = req.getRepositoryUrl();
+
+        TestProject project = TestProject.builder()
+                .name(req.getName())
+                .description(req.getDescription())
+                .storagePath(projectPath.toString())
+                .repositoryUrl(publicUrl)
+                .branch(req.getBranch() != null ? req.getBranch() : "main")
+                .testsDir(req.getTestsDir() != null ? req.getTestsDir() : "Tests")
+                .source(ProjectSource.GIT)
                 .venvStatus(VenvStatus.NONE)
                 .build();
 
         project = projectRepository.save(project);
 
-        // Indexer les fichiers .robot en base
-        indexer.indexProject(project);
+        // Le clone est lancé de façon asynchrone pour ne pas bloquer la réponse HTTP
+        // Les logs arrivent via WebSocket /topic/projects/{id}/setup
+        final Long projectId = project.getId();
+        final String username    = req.getUsername();
+        final String appPassword = req.getAppPassword();
+        final String branch      = project.getBranch();
 
-        // ⚠️ NE PAS appeler setupAsync ici — la transaction n'est pas encore
-        // committée. Le thread @Async ne trouverait pas le projet en base (404).
-        // setupAsync est déclenché par le controller APRÈS le commit.
-
+        // Persister avant de lancer le clone async
         return toResponse(project);
     }
 
     /**
-     * Déclenche l'installation du venv après le commit de la transaction.
-     * Appelé par le controller juste après createFromZip().
+     * Déclenche le clone Git + venv en arrière-plan.
+     * Appelé par le controller APRÈS le commit de la transaction.
+     */
+    public void triggerGitCloneAndSetup(Long projectId, String username,
+                                        String appPassword) {
+        gitCloneAsync(projectId, username, appPassword);
+    }
+
+    /**
+     * Déclenche l'installation du venv en arrière-plan.
+     * Appelé par le controller APRÈS le commit de la transaction (ZIP).
      */
     public void triggerVenvSetup(Long projectId) {
         venvSetup.setupAsync(projectId);
     }
 
-    /**
-     * Réindexe les fichiers .robot sans re-uploader le ZIP.
-     * Utile si le contenu a été modifié manuellement.
-     */
+    // ── Pull (mise à jour depuis Bitbucket) ───────────────────────────────────
+
+    public void pullProject(Long projectId, String username, String appPassword) {
+        gitPullAsync(projectId, username, appPassword);
+    }
+
+    // ── Async Git ─────────────────────────────────────────────────────────────
+
+    private void gitCloneAsync(Long projectId, String username, String appPassword) {
+        // Exécution dans un thread séparé
+        new Thread(() -> {
+            TestProject project = projectRepository.findById(projectId)
+                    .orElseThrow(() -> new RuntimeException("Projet introuvable : " + projectId));
+
+            String topic = "/topic/projects/" + projectId + "/setup";
+            Path projectPath = Path.of(project.getStoragePath()).toAbsolutePath().normalize();
+
+            try {
+                // ── Clone ──────────────────────────────────────────────────
+                gitService.clone(
+                        project.getRepositoryUrl(),
+                        username, appPassword,
+                        project.getBranch(),
+                        projectPath,
+                        topic, projectId);
+
+                // Détecter dossier racine dans le clone
+                Path effectivePath = detectRootDir(projectPath);
+                if (!effectivePath.equals(projectPath)) {
+                    project.setStoragePath(effectivePath.toString());
+                }
+
+                // Récupérer le hash du dernier commit
+                String commit = gitService.getLastCommit(effectivePath);
+                project.setLastCommit(commit);
+                project.setLastPulledAt(LocalDateTime.now());
+                projectRepository.save(project);
+
+                // ── Indexation ─────────────────────────────────────────────
+                indexer.indexProject(project);
+
+                // ── Setup venv ─────────────────────────────────────────────
+                venvSetup.setupAsync(projectId);
+
+            } catch (Exception e) {
+                log.error("Erreur clone projet {} : {}", projectId, e.getMessage());
+                project.setVenvStatus(VenvStatus.ERROR);
+                project.setVenvError("Erreur clone : " + e.getMessage());
+                projectRepository.save(project);
+            }
+        }, "git-clone-" + projectId).start();
+    }
+
+    private void gitPullAsync(Long projectId, String username, String appPassword) {
+        new Thread(() -> {
+            TestProject project = projectRepository.findById(projectId)
+                    .orElseThrow(() -> new RuntimeException("Projet introuvable : " + projectId));
+
+            String topic = "/topic/projects/" + projectId + "/setup";
+            Path projectPath = Path.of(project.getStoragePath()).toAbsolutePath().normalize();
+
+            try {
+                project.setVenvStatus(VenvStatus.NONE);
+                projectRepository.save(project);
+
+                gitService.pull(
+                        projectPath,
+                        username, appPassword,
+                        project.getBranch(),
+                        project.getRepositoryUrl(),
+                        topic, projectId);
+
+                String commit = gitService.getLastCommit(projectPath);
+                project.setLastCommit(commit);
+                project.setLastPulledAt(LocalDateTime.now());
+                projectRepository.save(project);
+
+                // Réindexer après le pull
+                indexer.indexProject(project);
+
+                // Réinstaller le venv (requirements.txt peut avoir changé)
+                venvSetup.reinstallAsync(projectId);
+
+            } catch (Exception e) {
+                log.error("Erreur pull projet {} : {}", projectId, e.getMessage());
+                project.setVenvStatus(VenvStatus.ERROR);
+                project.setVenvError("Erreur pull : " + e.getMessage());
+                projectRepository.save(project);
+            }
+        }, "git-pull-" + projectId).start();
+    }
+
+    // ── Autres méthodes existantes ─────────────────────────────────────────────
+
     @Transactional
     public TestProjectDto.Response reindex(Long projectId) throws IOException {
         TestProject project = getProject(projectId);
@@ -106,11 +225,8 @@ public class TestProjectService {
         return toResponse(project);
     }
 
-    /**
-     * Relance l'installation du venv (requirements.txt mis à jour).
-     */
     public void reinstallVenv(Long projectId) {
-        getProject(projectId); // vérification existence
+        getProject(projectId);
         venvSetup.reinstallAsync(projectId);
     }
 
@@ -126,13 +242,9 @@ public class TestProjectService {
         return toResponse(getProject(id));
     }
 
-    /**
-     * Retourne l'arborescence des fichiers .robot d'un projet.
-     */
     @Transactional(readOnly = true)
     public RobotFileDto.ProjectTree getProjectTree(Long projectId) {
         TestProject project = getProject(projectId);
-
         List<RobotFileDto.RobotFileItem> files = robotFileRepository
                 .findByProjectIdOrderByRelativePath(projectId)
                 .stream()
@@ -168,34 +280,36 @@ public class TestProjectService {
     public void deleteProject(Long id) {
         TestProject project = getProject(id);
         projectRepository.delete(project);
-        // Optionnel : supprimer le dossier physique
-        try {
-            deleteDir(Path.of(project.getStoragePath()));
-        } catch (IOException e) {
-            log.warn("Impossible de supprimer le dossier du projet : {}", e.getMessage());
+        try { deleteDir(Path.of(project.getStoragePath())); }
+        catch (IOException e) { log.warn("Dossier non supprimé : {}", e.getMessage()); }
+    }
+
+    // ── Privé ─────────────────────────────────────────────────────────────────
+
+    private void validateName(String name) {
+        if (projectRepository.existsByName(name)) {
+            throw new IllegalArgumentException(
+                    "Un projet nommé '" + name + "' existe déjà.");
         }
     }
 
-    // ── Privé ────────────────────────────────────────────────────────────────
+    private Path initProjectDir(String name) throws IOException {
+        String safeName = name.replaceAll("[^a-zA-Z0-9_\\-]", "_");
+        Path path = storageConfig.getProjectsPath().resolve(safeName);
+        Files.createDirectories(path);
+        return path;
+    }
 
-    /**
-     * Certains ZIPs contiennent un dossier racine unique (ex: eforex_im_gc_qa/).
-     * Si c'est le cas, on descend d'un niveau pour que storagePath pointe
-     * directement vers ce dossier.
-     */
     private Path detectRootDir(Path extractedPath) throws IOException {
         try (var stream = Files.list(extractedPath)) {
             List<Path> children = stream.collect(Collectors.toList());
             if (children.size() == 1 && Files.isDirectory(children.get(0))) {
                 Path candidate = children.get(0);
-                // Vérifier que c'est bien la racine du projet (contient Tests/ ou requirements.txt)
-                boolean hasTests = Files.exists(candidate.resolve("Tests"))
+                boolean hasMarker = Files.exists(candidate.resolve("Tests"))
                         || Files.exists(candidate.resolve("requirements.txt"))
-                        || Files.exists(candidate.resolve(".env"));
-                if (hasTests) {
-                    log.info("Dossier racine détecté dans le ZIP : {}", candidate.getFileName());
-                    return candidate;
-                }
+                        || Files.exists(candidate.resolve(".env"))
+                        || Files.exists(candidate.resolve(".git"));
+                if (hasMarker) return candidate;
             }
         }
         return extractedPath;
@@ -204,11 +318,10 @@ public class TestProjectService {
     private boolean isZip(MultipartFile file) {
         String name = file.getOriginalFilename();
         if (name != null && name.toLowerCase().endsWith(".zip")) return true;
-        String contentType = file.getContentType();
-        return contentType != null && (
-                contentType.equals("application/zip") ||
-                        contentType.equals("application/x-zip-compressed") ||
-                        contentType.equals("application/octet-stream"));
+        String ct = file.getContentType();
+        return ct != null && (ct.equals("application/zip") ||
+                ct.equals("application/x-zip-compressed") ||
+                ct.equals("application/octet-stream"));
     }
 
     private TestProject getProject(Long id) {
@@ -222,28 +335,30 @@ public class TestProjectService {
                 .forEach(p -> { try { Files.delete(p); } catch (IOException ignored) {} });
     }
 
-    // ── Mapper ───────────────────────────────────────────────────────────────
-
     private TestProjectDto.Response toResponse(TestProject p) {
         TestProjectDto.Response dto = new TestProjectDto.Response();
         dto.setId(p.getId());
         dto.setName(p.getName());
         dto.setDescription(p.getDescription());
         dto.setTestsDir(p.getTestsDir());
+        dto.setSource(p.getSource());
         dto.setOriginalZipName(p.getOriginalZipName());
+        dto.setRepositoryUrl(p.getRepositoryUrl());
+        dto.setBranch(p.getBranch());
+        dto.setLastCommit(p.getLastCommit());
+        dto.setLastPulledAt(p.getLastPulledAt());
         dto.setVenvStatus(p.getVenvStatus());
         dto.setVenvError(p.getVenvError());
         dto.setUsesPabot(p.isUsesPabot());
         dto.setCreatedAt(p.getCreatedAt());
         dto.setUpdatedAt(p.getUpdatedAt());
         dto.setVenvCreatedAt(p.getVenvCreatedAt());
-        dto.setTotalFiles((int) robotFileRepository.count());
+        dto.setTotalFiles(robotFileRepository.findByProjectIdOrderByRelativePath(p.getId()).size());
         dto.setTotalTestCases((int) testCaseRepository.countByProjectId(p.getId()));
-        dto.setTotalRuns(runRepository.countByProjectIdAndStatus(p.getId(), RunStatus.PASSED)
-                + runRepository.countByProjectIdAndStatus(p.getId(), RunStatus.FAILED)
-                + runRepository.countByProjectIdAndStatus(p.getId(), RunStatus.ERROR));
         dto.setPassedRuns(runRepository.countByProjectIdAndStatus(p.getId(), RunStatus.PASSED));
         dto.setFailedRuns(runRepository.countByProjectIdAndStatus(p.getId(), RunStatus.FAILED));
+        dto.setTotalRuns(dto.getPassedRuns() + dto.getFailedRuns() +
+                runRepository.countByProjectIdAndStatus(p.getId(), RunStatus.ERROR));
         return dto;
     }
 }

@@ -13,11 +13,21 @@ import TextField from '@mui/material/TextField';
 import Alert from '@mui/material/Alert';
 import CircularProgress from '@mui/material/CircularProgress';
 import Divider from '@mui/material/Divider';
+import Tabs from '@mui/material/Tabs';
+import Tab from '@mui/material/Tab';
+import InputAdornment from '@mui/material/InputAdornment';
+import IconButton from '@mui/material/IconButton';
+import Tooltip from '@mui/material/Tooltip';
 import AddIcon from '@mui/icons-material/Add';
 import DeleteIcon from '@mui/icons-material/Delete';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
+import GitHubIcon from '@mui/icons-material/GitHub';
+import VisibilityIcon from '@mui/icons-material/Visibility';
+import VisibilityOffIcon from '@mui/icons-material/VisibilityOff';
+import RefreshIcon from '@mui/icons-material/Refresh';
 import { projectApi } from '../api/client';
 import StatusChip from '../components/StatusChip';
+import GitForm from '../components/GitForm';
 
 export default function Projects({ onProjectsChange }) {
   const [projects, setProjects] = useState([]);
@@ -39,13 +49,23 @@ export default function Projects({ onProjectsChange }) {
     load();
   };
 
+  const handlePull = async (e, id) => {
+    e.stopPropagation();
+    const username    = window.prompt('Bitbucket username :');
+    const appPassword = window.prompt('Bitbucket App Password :');
+    if (!username || !appPassword) return;
+    await projectApi.pull(id, username, appPassword);
+    alert('Pull lancé — suivez les logs dans l\'onglet Setup venv du projet');
+  };
+
   return (
     <Box sx={{ p: 3, overflow: 'auto', flex: 1 }}>
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 3 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center',
+        justifyContent: 'space-between', mb: 3 }}>
         <Box>
           <Typography variant="h5">Projets</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            Chaque projet est un dépôt Robot Framework avec son venv Python isolé
+            Importez un ZIP ou clonez depuis Bitbucket
           </Typography>
         </Box>
         <Button variant="contained" startIcon={<AddIcon />} onClick={() => setOpen(true)}>
@@ -60,7 +80,7 @@ export default function Projects({ onProjectsChange }) {
       ) : projects.length === 0 ? (
         <Paper sx={{ p: 6, textAlign: 'center' }}>
           <Typography color="text.disabled" sx={{ mb: 2 }}>
-            Aucun projet — importez votre premier ZIP Robot Framework
+            Aucun projet — importez un ZIP ou clonez depuis Bitbucket
           </Typography>
           <Button variant="contained" startIcon={<AddIcon />} onClick={() => setOpen(true)}>
             Créer un projet
@@ -78,14 +98,32 @@ export default function Projects({ onProjectsChange }) {
                   '&:hover': { borderColor: 'primary.main' },
                 }}
               >
-                {/* Header carte */}
+                {/* Header */}
                 <Box sx={{ px: 2.5, py: 2, display: 'flex',
                   alignItems: 'center', justifyContent: 'space-between' }}>
-                  <Typography variant="subtitle1" fontWeight={700} noWrap sx={{ flex: 1 }}>
-                    {p.name}
-                  </Typography>
+                  <Box sx={{ flex: 1, minWidth: 0 }}>
+                    <Typography variant="subtitle1" fontWeight={700} noWrap>
+                      {p.name}
+                    </Typography>
+                    {/* Badge source */}
+                    <Typography variant="caption" sx={{
+                      color: p.source === 'GIT' ? 'primary.main' : 'text.disabled',
+                      fontFamily: 'monospace',
+                    }}>
+                      {p.source === 'GIT' ? '⎇ ' + (p.branch || 'main') : '📦 ZIP'}
+                    </Typography>
+                  </Box>
                   <StatusChip status={p.venvStatus} />
                 </Box>
+
+                {/* URL repo si GIT */}
+                {p.source === 'GIT' && p.repositoryUrl && (
+                  <Typography variant="caption" color="text.disabled"
+                    sx={{ px: 2.5, pb: 1, display: 'block',
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {p.repositoryUrl}
+                  </Typography>
+                )}
 
                 {p.description && (
                   <Typography variant="caption" color="text.secondary"
@@ -105,7 +143,8 @@ export default function Projects({ onProjectsChange }) {
                   ].map(s => (
                     <Grid item xs={4} key={s.label} sx={{ textAlign: 'center' }}>
                       <Typography variant="h6" sx={{
-                        color: s.color, fontFamily: '"JetBrains Mono", monospace',
+                        color: s.color,
+                        fontFamily: '"JetBrains Mono", monospace',
                       }}>
                         {s.value ?? '—'}
                       </Typography>
@@ -123,15 +162,27 @@ export default function Projects({ onProjectsChange }) {
                 <Box sx={{ px: 2.5, py: 1.5, display: 'flex',
                   alignItems: 'center', justifyContent: 'space-between' }}>
                   <Typography variant="caption" color="text.disabled" noWrap sx={{ flex: 1 }}>
-                    {p.originalZipName}
+                    {p.source === 'GIT' && p.lastCommit
+                      ? `commit ${p.lastCommit}`
+                      : p.originalZipName || ''}
                   </Typography>
-                  <Button
-                    size="small" color="error" startIcon={<DeleteIcon fontSize="small" />}
-                    onClick={e => handleDelete(e, p.id)}
-                    sx={{ ml: 1, fontSize: 11 }}
-                  >
-                    Supprimer
-                  </Button>
+                  <Box sx={{ display: 'flex', gap: 0.5, ml: 1 }}>
+                    {/* Bouton pull si GIT */}
+                    {p.source === 'GIT' && (
+                      <Tooltip title="git pull">
+                        <IconButton size="small" color="primary"
+                          onClick={e => handlePull(e, p.id)}>
+                          <RefreshIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    )}
+                    <Button size="small" color="error"
+                      startIcon={<DeleteIcon fontSize="small" />}
+                      onClick={e => handleDelete(e, p.id)}
+                      sx={{ fontSize: 11 }}>
+                      Supprimer
+                    </Button>
+                  </Box>
                 </Box>
               </Paper>
             </Grid>
@@ -148,7 +199,37 @@ export default function Projects({ onProjectsChange }) {
   );
 }
 
+// ── Modal de création ──────────────────────────────────────────────────────
+
 function CreateProjectDialog({ open, onClose, onCreated }) {
+  const [tab, setTab] = useState(0); // 0 = ZIP, 1 = Bitbucket
+
+  const handleClose = () => { setTab(0); onClose(); };
+
+  return (
+    <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
+      <DialogTitle>Nouveau projet</DialogTitle>
+      <DialogContent sx={{ pt: '8px !important' }}>
+        <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 2 }}>
+          <Tab label="📦 Upload ZIP" />
+          <Tab label="⎇ Bitbucket" />
+        </Tabs>
+
+        {tab === 0 && (
+          <ZipForm onCreated={onCreated} onClose={handleClose} />
+        )}
+        {tab === 1 && (
+          // ← Ici on utilise le composant importé au lieu du inline
+          <GitForm onCreated={onCreated} onClose={handleClose} />
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ── Formulaire ZIP ─────────────────────────────────────────────────────────
+
+function ZipForm({ onCreated, onClose }) {
   const [name,     setName]     = useState('');
   const [desc,     setDesc]     = useState('');
   const [testsDir, setTestsDir] = useState('Tests');
@@ -157,10 +238,6 @@ function CreateProjectDialog({ open, onClose, onCreated }) {
   const [error,    setError]    = useState('');
   const [drag,     setDrag]     = useState(false);
   const inputRef = useRef();
-
-  const reset = () => { setName(''); setDesc(''); setTestsDir('Tests'); setFile(null); setError(''); };
-
-  const handleClose = () => { reset(); onClose(); };
 
   const handleDrop = (e) => {
     e.preventDefault(); setDrag(false);
@@ -173,8 +250,8 @@ function CreateProjectDialog({ open, onClose, onCreated }) {
     if (!file)        return setError('Sélectionnez un fichier ZIP');
     setLoading(true); setError('');
     try {
-      await projectApi.create(name, desc, testsDir, file);
-      reset(); onCreated();
+      await projectApi.createFromZip(name, desc, testsDir, file);
+      onCreated();
     } catch (e) {
       setError(e.message || 'Erreur lors de la création');
     } finally {
@@ -183,75 +260,56 @@ function CreateProjectDialog({ open, onClose, onCreated }) {
   };
 
   return (
-    <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
-      <DialogTitle>Nouveau projet</DialogTitle>
-      <DialogContent>
-        <TextField
-          label="Nom du projet *" fullWidth margin="normal" size="small"
-          value={name} onChange={e => setName(e.target.value)}
-          placeholder="eforex, einsurance…" autoFocus
-        />
-        <TextField
-          label="Description" fullWidth margin="normal" size="small"
-          value={desc} onChange={e => setDesc(e.target.value)}
-        />
-        <TextField
-          label="Dossier des tests" fullWidth margin="normal" size="small"
-          value={testsDir} onChange={e => setTestsDir(e.target.value)}
-          helperText="Dossier contenant les fichiers .robot (défaut : Tests)"
-        />
+    <>
+      <TextField label="Nom du projet *" fullWidth margin="dense" size="small"
+        value={name} onChange={e => setName(e.target.value)} autoFocus />
+      <TextField label="Description" fullWidth margin="dense" size="small"
+        value={desc} onChange={e => setDesc(e.target.value)} />
+      <TextField label="Dossier des tests" fullWidth margin="dense" size="small"
+        value={testsDir} onChange={e => setTestsDir(e.target.value)}
+        helperText="Dossier contenant les .robot (défaut : Tests)" />
 
-        {/* Zone upload */}
-        <Box
-          onDragOver={e => { e.preventDefault(); setDrag(true); }}
-          onDragLeave={() => setDrag(false)}
-          onDrop={handleDrop}
-          onClick={() => inputRef.current.click()}
-          sx={{
-            mt: 2, p: 3, border: '2px dashed',
-            borderColor: drag ? 'primary.main' : 'divider',
-            borderRadius: 2, textAlign: 'center', cursor: 'pointer',
-            bgcolor: drag ? 'primary.dark' : 'transparent',
-            transition: 'all 0.2s',
-            '&:hover': { borderColor: 'primary.main', bgcolor: '#1c2030' },
-          }}
-        >
-          <CloudUploadIcon sx={{ fontSize: 36, color: 'text.disabled', mb: 1 }} />
-          {file ? (
-            <>
-              <Typography variant="body2" fontWeight={600} color="primary.main">
-                {file.name}
-              </Typography>
-              <Typography variant="caption" color="text.disabled">
-                {(file.size / 1024 / 1024).toFixed(1)} Mo
-              </Typography>
-            </>
-          ) : (
-            <>
-              <Typography variant="body2" color="text.secondary">
-                Glissez votre ZIP ou <Typography component="span" color="primary.main">
-                  cliquez pour parcourir
-                </Typography>
-              </Typography>
-              <Typography variant="caption" color="text.disabled">
-                Sans venv/ — max 50 Mo
-              </Typography>
-            </>
-          )}
-          <input ref={inputRef} type="file" accept=".zip"
-            style={{ display: 'none' }}
-            onChange={e => setFile(e.target.files[0])} />
-        </Box>
+      <Box onDragOver={e => { e.preventDefault(); setDrag(true); }}
+        onDragLeave={() => setDrag(false)}
+        onDrop={handleDrop}
+        onClick={() => inputRef.current.click()}
+        sx={{
+          mt: 2, p: 3, border: '2px dashed',
+          borderColor: drag ? 'primary.main' : 'divider',
+          borderRadius: 2, textAlign: 'center', cursor: 'pointer',
+          bgcolor: drag ? 'primary.dark' : 'transparent',
+          transition: 'all 0.2s',
+          '&:hover': { borderColor: 'primary.main', bgcolor: '#1c2030' },
+        }}>
+        <CloudUploadIcon sx={{ fontSize: 36, color: 'text.disabled', mb: 1 }} />
+        {file ? (
+          <Typography variant="body2" color="primary.main" fontWeight={600}>
+            {file.name} — {(file.size / 1024 / 1024).toFixed(1)} Mo
+          </Typography>
+        ) : (
+          <Typography variant="body2" color="text.secondary">
+            Glissez votre ZIP ou{' '}
+            <Typography component="span" color="primary.main">cliquez</Typography>
+            <br />
+            <Typography variant="caption" color="text.disabled">
+              Sans venv/ — max 50 Mo
+            </Typography>
+          </Typography>
+        )}
+        <input ref={inputRef} type="file" accept=".zip"
+          style={{ display: 'none' }}
+          onChange={e => setFile(e.target.files[0])} />
+      </Box>
 
-        {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
-      </DialogContent>
-      <DialogActions sx={{ px: 3, pb: 2 }}>
-        <Button onClick={handleClose}>Annuler</Button>
+      {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
+
+      <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, mt: 2 }}>
+        <Button onClick={onClose}>Annuler</Button>
         <Button variant="contained" onClick={handleSubmit} disabled={loading}
           startIcon={loading ? <CircularProgress size={16} /> : null}>
-          {loading ? 'Création…' : 'Créer le projet'}
+          {loading ? 'Création…' : 'Créer'}
         </Button>
-      </DialogActions>
-    </Dialog>
+      </Box>
+    </>
   );
 }

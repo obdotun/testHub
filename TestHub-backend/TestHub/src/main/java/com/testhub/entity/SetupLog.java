@@ -7,25 +7,26 @@ import lombok.*;
 import java.time.LocalDateTime;
 
 /**
- * Persiste chaque ligne de log d'un run.
- * Permet de recharger l'historique des logs même après la fin du run.
+ * Persiste chaque ligne de log du setup venv d'un projet.
+ * Permet de consulter les logs après la fin de l'installation
+ * — même après rechargement de la page.
  */
 @Entity
-@Table(name = "run_log", indexes = {
-        @Index(name = "idx_run_log_run_id", columnList = "run_id")
+@Table(name = "setup_log", indexes = {
+        @Index(name = "idx_setup_log_project_id", columnList = "project_id")
 })
 @Getter @Setter
 @NoArgsConstructor @AllArgsConstructor
 @Builder
-public class RunLog {
+public class SetupLog {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "run_id", nullable = false)
-    private TestRun run;
+    @JoinColumn(name = "project_id", nullable = false)
+    private TestProject project;
 
     @Column(nullable = false, length = 2000)
     private String text;

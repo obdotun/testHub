@@ -30,7 +30,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -39,27 +39,23 @@ public class ExecutionService {
 
     private final TestRunRepository     runRepository;
     private final TestProjectRepository projectRepository;
+    private final RunLogRepository      runLogRepository;  // ← persistance logs
     private final StorageConfig         storageConfig;
     private final SimpMessagingTemplate messaging;
     private final DotEnvLoader          dotEnvLoader;
     private final OutputXmlParser       outputXmlParser;
-    private final RunLogRepository runLogRepository;
 
-    /**
-     * Crée le TestRun en base et lance l'exécution en arrière-plan.
-     * Retourne immédiatement avec le run en statut PENDING.
-     */
+    // ── Lancement ────────────────────────────────────────────────────────────
+
     public TestRunDto.Response launchRun(TestRunDto.LaunchRequest req) {
         TestProject project = projectRepository.findById(req.getProjectId())
                 .orElseThrow(() -> new RuntimeException(
                         "Projet introuvable : id=" + req.getProjectId()));
 
-        // Vérifier que le venv est prêt
         if (project.getVenvStatus() != VenvStatus.READY) {
             throw new IllegalStateException(
                     "Le venv du projet n'est pas prêt (statut : " +
-                            project.getVenvStatus() + "). " +
-                            "Attendez la fin de l'installation ou relancez via /reinstall-venv.");
+                            project.getVenvStatus() + ").");
         }
 
         boolean usePabot = req.isForcePabot() || project.isUsesPabot();
@@ -74,18 +70,12 @@ public class ExecutionService {
                 .build();
 
         run = runRepository.save(run);
-
-        // Lancer en arrière-plan — non bloquant
         executeAsync(run.getId(), req.getProcesses());
-
         return toResponse(run);
     }
 
-    /**
-     * Exécution asynchrone — tourne dans un thread séparé (@Async).
-     * Streame chaque ligne de sortie en WebSocket.
-     * Canal : /topic/runs/{runId}/logs
-     */
+    // ── Exécution asynchrone ─────────────────────────────────────────────────
+
     @Async
     public void executeAsync(Long runId, int processes) {
         TestRun run = runRepository.findById(runId)
@@ -98,124 +88,145 @@ public class ExecutionService {
 
         TestProject project = run.getProject();
 
-        // ── Chemins absolus normalisés (cross-platform Windows + Linux/Docker) ──
+        // Chemins absolus normalisés (cross-platform Windows + Linux/Docker)
         Path projectPath = Path.of(project.getStoragePath()).toAbsolutePath().normalize();
         Path venvPath    = Path.of(project.getVenvPath()).toAbsolutePath().normalize();
-        Path reportDir   = storageConfig.getReportsPath().resolve("run-" + runId)
+        Path reportDir   = storageConfig.getReportsPath()
+                .resolve("run-" + runId)
                 .toAbsolutePath().normalize();
 
-        send(topic, LogMessage.system(runId, "══════════════════════════════════════"));
-        send(topic, LogMessage.system(runId, "  Exécution #" + runId + " — " + run.getLabel()));
-        send(topic, LogMessage.system(runId, "══════════════════════════════════════"));
+        send(run, topic, LogMessage.system(runId, "══════════════════════════════════════"));
+        send(run, topic, LogMessage.system(runId, "  Exécution #" + runId + " — " + run.getLabel()));
+        send(run, topic, LogMessage.system(runId, "══════════════════════════════════════"));
 
-        // ── Vérification existence du dossier projet ─────────────────────────
+        // Vérification dossier projet
         if (!Files.exists(projectPath) || !Files.isDirectory(projectPath)) {
             String msg = "Dossier projet introuvable : " + projectPath;
-            send(topic, LogMessage.error(runId, msg));
-            run.setStatus(RunStatus.ERROR);
-            run.setErrorMessage(msg);
-            run.setFinishedAt(LocalDateTime.now());
-            runRepository.save(run);
+            send(run, topic, LogMessage.error(runId, msg));
+            errorFinalize(run, msg);
             return;
         }
 
-        // ── Vérification existence du venv ───────────────────────────────────
+        // Vérification venv
         if (!Files.exists(venvPath) || !Files.isDirectory(venvPath)) {
-            String msg = "Venv introuvable : " + venvPath + " — relancez l'installation du venv";
-            send(topic, LogMessage.error(runId, msg));
-            run.setStatus(RunStatus.ERROR);
-            run.setErrorMessage(msg);
-            run.setFinishedAt(LocalDateTime.now());
-            runRepository.save(run);
+            String msg = "Venv introuvable : " + venvPath + " — relancez l'installation";
+            send(run, topic, LogMessage.error(runId, msg));
+            errorFinalize(run, msg);
             return;
         }
 
         try {
             Files.createDirectories(reportDir);
 
-            // ── Construire la commande ───────────────────────────────────────
-            // buildCommand utilise storageConfig.getRobotExecutable(venvPath)
-            // qui retourne venv/Scripts/robot.exe (Windows) ou venv/bin/robot (Linux)
-            // → aucun cmd /c nécessaire, l'exécutable est absolu
             List<String> command = buildCommand(run, venvPath, projectPath, reportDir, processes);
-
-            send(topic, LogMessage.system(runId,
+            send(run, topic, LogMessage.system(runId,
                     "Commande : " + String.join(" ", command)));
 
-            // ── Charger le .env ─────────────────────────────────────────────
             Map<String, String> envVars = dotEnvLoader.load(projectPath);
             if (!envVars.isEmpty()) {
-                send(topic, LogMessage.info(runId,
+                send(run, topic, LogMessage.info(runId,
                         "Variables .env chargées : " + envVars.size()));
             }
 
-            // ── Démarrer le processus ────────────────────────────────────────
-            // Pas de cmd /c — l'exécutable robot/pabot est en chemin absolu
-            // Fonctionne identiquement sur Windows, Linux et Docker
             ProcessBuilder pb = new ProcessBuilder(command);
-            pb.directory(projectPath.toFile()); // chemin absolu normalisé ✅
-            pb.redirectErrorStream(true);        // merge stdout + stderr
-            setupEnvironment(pb, venvPath, envVars);    // variables du .env
+            pb.directory(projectPath.toFile());
+            pb.redirectErrorStream(true);
+
+            // Configure venv dans l'environnement (cross-platform)
+            setupEnvironment(pb, venvPath, envVars);
 
             LocalDateTime start   = LocalDateTime.now();
             Process       process = pb.start();
 
-            // ── Streamer les logs ligne par ligne ────────────────────────────
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(process.getInputStream()))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    send(topic, categorize(runId, line));
+                    send(run, topic, categorize(runId, line));
                 }
             }
 
-            // ── Attendre la fin (avec timeout) ───────────────────────────────
             boolean finished = process.waitFor(
                     storageConfig.getExecutionTimeoutSeconds(), TimeUnit.SECONDS);
 
             if (!finished) {
                 process.destroyForcibly();
-                finalize(run, RunStatus.ERROR, start, reportDir,
-                        0, 0, 0, "Timeout dépassé (" +
-                                storageConfig.getExecutionTimeoutSeconds() + "s)");
-                send(topic, LogMessage.error(runId, "✘ Timeout dépassé"));
+                finalize(run, RunStatus.ERROR, start, reportDir, 0, 0, 0,
+                        "Timeout dépassé (" + storageConfig.getExecutionTimeoutSeconds() + "s)");
+                send(run, topic, LogMessage.error(runId, "✘ Timeout dépassé"));
                 return;
             }
 
-            // ── Lire les résultats depuis output.xml ─────────────────────────
             OutputXmlParser.Result result = outputXmlParser.parse(reportDir);
             RunStatus status = result.allPassed() ? RunStatus.PASSED : RunStatus.FAILED;
-
             finalize(run, status, start, reportDir,
                     result.passed(), result.failed(), result.skipped(), null);
 
             String summary = String.format(
                     "Résultat : %d passés | %d échoués | %d ignorés",
                     result.passed(), result.failed(), result.skipped());
-            send(topic, status == RunStatus.PASSED
+            send(run, topic, status == RunStatus.PASSED
                     ? LogMessage.success(runId, "✔ " + summary)
-                    : LogMessage.error(runId,   "✘ " + summary));
+                    : LogMessage.error(runId, "✘ " + summary));
 
         } catch (Exception e) {
             log.error("Erreur lors du run {}", runId, e);
-            send(topic, LogMessage.error(runId, "Erreur système : " + e.getMessage()));
-            run.setStatus(RunStatus.ERROR);
-            run.setErrorMessage(e.getMessage());
-            run.setFinishedAt(LocalDateTime.now());
-            runRepository.save(run);
+            send(run, topic, LogMessage.error(runId, "Erreur système : " + e.getMessage()));
+            errorFinalize(run, e.getMessage());
         }
 
-        send(topic, LogMessage.system(runId,
+        send(run, topic, LogMessage.system(runId,
                 "══ Fin exécution : " + run.getStatus() + " ══"));
     }
 
-    // ── Construction de la commande ─────────────────────────────────────────
+    // ── Logs persistés ───────────────────────────────────────────────────────
 
     /**
-     * Construit la commande d'exécution robot/pabot.
-     * Utilise des chemins absolus — cross-platform Windows + Linux/Docker.
-     * Suppression de --rerunfailed (cause échec si output.xml absent).
+     * Retourne les logs persistés d'un run.
+     * Appelé par le frontend au montage de RunDetail
+     * pour afficher les logs même si le run est déjà terminé.
      */
+    public List<LogMessage> getRunLogs(Long runId) {
+        return runLogRepository.findByRunIdOrderByIdAsc(runId)
+                .stream()
+                .map(l -> LogMessage.builder()
+                        .sourceId(runId)
+                        .text(l.getText())
+                        .level(l.getLevel())
+                        .timestamp(l.getTimestamp())
+                        .build())
+                .collect(Collectors.toList());
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /**
+     * Envoie un log via WebSocket ET le persiste en base.
+     * Garantit que les logs sont disponibles même après navigation.
+     */
+    private void send(TestRun run, String topic, LogMessage msg) {
+        // 1. WebSocket temps réel
+        messaging.convertAndSend(topic, msg);
+
+        // 2. Persistance en base
+        try {
+            runLogRepository.save(RunLog.builder()
+                    .run(run)
+                    .text(msg.getText() != null ? msg.getText() : "")
+                    .level(msg.getLevel())
+                    .timestamp(msg.getTimestamp() != null
+                            ? msg.getTimestamp() : LocalDateTime.now())
+                    .build());
+        } catch (Exception e) {
+            log.warn("Log non persisté pour run {} : {}", run.getId(), e.getMessage());
+        }
+    }
+
+    /** Ancienne signature conservée pour compatibilité interne */
+    private void send(String topic, LogMessage msg) {
+        messaging.convertAndSend(topic, msg);
+    }
+
     private List<String> buildCommand(TestRun run, Path venvPath,
                                       Path projectPath, Path reportDir,
                                       int processes) {
@@ -225,8 +236,7 @@ public class ExecutionService {
         if (usePabot) {
             cmd.add(storageConfig.getPabotExecutable(venvPath)
                     .toAbsolutePath().normalize().toString());
-            cmd.add("--processes");
-            cmd.add(String.valueOf(processes));
+            cmd.add("--processes"); cmd.add(String.valueOf(processes));
         } else {
             cmd.add(storageConfig.getRobotExecutable(venvPath)
                     .toAbsolutePath().normalize().toString());
@@ -256,63 +266,50 @@ public class ExecutionService {
     }
 
     /**
-     * Configure les variables d'environnement du ProcessBuilder
-     * pour que robot/pabot utilise le venv du projet et non le Python système.
-     *
-     * Cross-platform :
-     *   Windows : venv/Scripts/ + venv/Lib/site-packages/
-     *   Linux/Docker : venv/bin/ + venv/lib/pythonX.Y/site-packages/
+     * Configure les variables d'environnement pour que robot/pabot
+     * utilise le venv du projet et non le Python système.
+     * Cross-platform : Windows + Linux/Docker.
      */
     private void setupEnvironment(ProcessBuilder pb, Path venvPath,
                                   Map<String, String> dotEnvVars) {
-
         Map<String, String> env = pb.environment();
 
-        // ── 1. Variables du .env du projet ───────────────────────────────────
+        // 1. Variables du .env
         env.putAll(dotEnvVars);
 
-        // ── 2. Priorité au venv dans PATH ────────────────────────────────────
-        // Windows : venv/Scripts   | Linux/Docker : venv/bin
-        boolean isWindows = System.getProperty("os.name")
-                .toLowerCase().contains("win");
+        // 2. Priorité au venv dans PATH
+        boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
         String binDir = isWindows ? "Scripts" : "bin";
         Path venvBin  = venvPath.resolve(binDir).toAbsolutePath().normalize();
 
-        String currentPath = env.getOrDefault("PATH",
-                env.getOrDefault("Path", ""));
+        String currentPath = env.getOrDefault("PATH", env.getOrDefault("Path", ""));
         env.put("PATH", venvBin + File.pathSeparator + currentPath);
         if (isWindows) {
-            // Windows a parfois "Path" au lieu de "PATH"
             env.put("Path", venvBin + File.pathSeparator + currentPath);
         }
 
-        // ── 3. PYTHONPATH → forcer l'utilisation du venv ─────────────────────
-        // Windows : venv/Lib/site-packages
-        // Linux   : venv/lib/pythonX.Y/site-packages (détection dynamique)
+        // 3. PYTHONPATH → forcer les modules du venv
         Path sitePackages = resolveSitePackages(venvPath, isWindows);
         String currentPythonPath = env.getOrDefault("PYTHONPATH", "");
         env.put("PYTHONPATH", sitePackages + File.pathSeparator + currentPythonPath);
 
-        // ── 4. VIRTUAL_ENV → indique à Python qu'un venv est actif ───────────
+        // 4. VIRTUAL_ENV → indique à Python qu'un venv est actif
         env.put("VIRTUAL_ENV", venvPath.toAbsolutePath().normalize().toString());
 
-        // ── 5. Désactiver l'héritage du Python système ───────────────────────
-        // Empêche pabot/robot de résoudre des modules hors du venv
+        // 5. Supprimer PYTHONHOME pour éviter les conflits avec le Python système
         env.remove("PYTHONHOME");
     }
 
     /**
      * Résout le dossier site-packages du venv.
-     *
-     * Windows : venv/Lib/site-packages  (fixe)
-     * Linux   : venv/lib/python3.X/site-packages  (version dynamique)
+     * Windows : venv/Lib/site-packages
+     * Linux/Docker : venv/lib/python3.X/site-packages (version dynamique)
      */
     private Path resolveSitePackages(Path venvPath, boolean isWindows) {
         if (isWindows) {
             return venvPath.resolve("Lib").resolve("site-packages")
                     .toAbsolutePath().normalize();
         }
-        // Linux/Docker : chercher le dossier python3.X dynamiquement
         Path libDir = venvPath.resolve("lib");
         if (Files.exists(libDir)) {
             try (var stream = Files.list(libDir)) {
@@ -328,9 +325,6 @@ public class ExecutionService {
         return libDir.resolve("site-packages");
     }
 
-    // ── Helpers ─────────────────────────────────────────────────────────────
-
-    /** Catégorise une ligne de log selon son contenu */
     private LogMessage categorize(Long runId, String line) {
         String lower = line.toLowerCase();
         if (lower.contains("| fail |") || lower.contains("error") || lower.contains("failed")) {
@@ -359,35 +353,21 @@ public class ExecutionService {
         runRepository.save(run);
     }
 
-    private void send(String topic, LogMessage msg) {
-        // 1. Streamer via WebSocket (temps réel)
-        messaging.convertAndSend(topic, msg);
-
-        // 2. Persister en base (pour chargement ultérieur)
-        if (msg.getSourceId() != null) {
-            runRepository.findById(msg.getSourceId()).ifPresent(run -> {
-                RunLog log = RunLog.builder()
-                        .run(run)
-                        .text(msg.getText())
-                        .level(msg.getLevel())
-                        .build();
-                runLogRepository.save(log);
-            });
-        }
+    private void errorFinalize(TestRun run, String errorMsg) {
+        run.setStatus(RunStatus.ERROR);
+        run.setErrorMessage(errorMsg);
+        run.setFinishedAt(LocalDateTime.now());
+        runRepository.save(run);
     }
 
     private String buildLabel(TestRunDto.LaunchRequest req) {
-        if (req.getLabel() != null && !req.getLabel().isBlank()) {
-            return req.getLabel();
-        }
+        if (req.getLabel() != null && !req.getLabel().isBlank()) return req.getLabel();
         if (req.getMode() == ExecutionMode.SINGLE_TEST) {
             String[] parts = req.getTarget().split("::");
             return parts.length == 2 ? parts[1].trim() : req.getTarget();
         }
         return req.getTarget();
     }
-
-    // ── Mapper ───────────────────────────────────────────────────────────────
 
     public TestRunDto.Response toResponse(TestRun r) {
         TestRunDto.Response dto = new TestRunDto.Response();

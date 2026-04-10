@@ -2,8 +2,10 @@ package com.testhub.service;
 
 import com.testhub.config.StorageConfig;
 import com.testhub.dto.LogMessage;
+import com.testhub.entity.SetupLog;
 import com.testhub.entity.TestProject;
 import com.testhub.enums.VenvStatus;
+import com.testhub.repository.SetupLogRepository;
 import com.testhub.repository.TestProjectRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -21,98 +23,120 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Gère la création du venv Python et l'installation des dépendances
- * pour un projet, avec streaming des logs via WebSocket.
+ * Gère la création du venv Python et l'installation des dépendances.
+ *
+ * Corrections :
+ *  1. venvStatus = ERROR si pip install échoue (plus de faux READY)
+ *  2. Logs persistés en base → consultables après rechargement de page
  *
  * Canal WebSocket : /topic/projects/{projectId}/setup
+ * Endpoint logs   : GET /api/projects/{id}/setup-logs
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class VenvSetupService {
 
-    private final StorageConfig             storageConfig;
-    private final TestProjectRepository     projectRepository;
-    private final SimpMessagingTemplate     messaging;
+    private final StorageConfig         storageConfig;
+    private final TestProjectRepository projectRepository;
+    private final SetupLogRepository    setupLogRepository;
+    private final SimpMessagingTemplate messaging;
 
-    /**
-     * Lance le setup du venv en arrière-plan.
-     * Appelé après l'extraction du ZIP.
-     */
     @Async
     public void setupAsync(Long projectId) {
         TestProject project = projectRepository.findById(projectId)
                 .orElseThrow(() -> new RuntimeException("Projet introuvable : " + projectId));
 
+        // Supprimer les anciens logs avant de recommencer
+        setupLogRepository.deleteByProjectId(projectId);
+
         project.setVenvStatus(VenvStatus.INSTALLING);
         projectRepository.save(project);
 
-        // ── Chemins absolus normalisés (cross-platform Windows + Linux/Docker) ──
         Path projectPath = Path.of(project.getStoragePath()).toAbsolutePath().normalize();
         Path venvPath    = projectPath.resolve("venv").toAbsolutePath().normalize();
         String topic     = "/topic/projects/" + projectId + "/setup";
 
-        send(topic, LogMessage.system(projectId, "══════════════════════════════════════"));
-        send(topic, LogMessage.system(projectId, "  Setup venv — " + project.getName()));
-        send(topic, LogMessage.system(projectId, "══════════════════════════════════════"));
+        send(project, topic, LogMessage.system(projectId, "══════════════════════════════════════"));
+        send(project, topic, LogMessage.system(projectId, "  Setup venv — " + project.getName()));
+        send(project, topic, LogMessage.system(projectId, "══════════════════════════════════════"));
 
         try {
-            // ── Étape 1 : Créer le venv ─────────────────────────────────────
-            // Commande : python /abs/path/venv  → absolu, pas de cmd /c nécessaire
-            send(topic, LogMessage.info(projectId,
-                    "▶ Création du venv avec " + storageConfig.getPythonExecutable()));
+            // ── Vérification Python disponible ───────────────────────────────
+            send(project, topic, LogMessage.info(projectId,
+                    "▶ Python : " + storageConfig.getPythonExecutable()));
+
+            // ── Étape 1 : Créer le venv ──────────────────────────────────────
+            send(project, topic, LogMessage.info(projectId, "▶ Création du venv…"));
 
             int rc = runCommand(
-                    List.of(storageConfig.getPythonExecutable(), "-m", "venv",
-                            venvPath.toString()),
-                    projectPath, topic, projectId);
+                    List.of(storageConfig.getPythonExecutable(),
+                            "-m", "venv", venvPath.toString()),
+                    projectPath, topic, project);
 
             if (rc != 0) {
-                fail(project, venvPath, topic, "Échec de la création du venv (exit " + rc + ")");
+                fail(project, venvPath, topic,
+                        "Échec création du venv (exit " + rc + ") — " +
+                                "Python est-il installé ? " +
+                                "Commande : " + storageConfig.getPythonExecutable());
                 return;
             }
-            send(topic, LogMessage.success(projectId, "✔ Venv créé : " + venvPath));
+            send(project, topic, LogMessage.success(projectId, "✔ Venv créé : " + venvPath));
 
-            // ── Étape 2 : Mettre à jour pip ──────────────────────────────────
-            // Utilise python -m pip (plus fiable que pip.exe direct sur Windows)
-            // et fonctionne identiquement sur Linux/Docker
+            // ── Vérification que le venv existe bien ─────────────────────────
             Path pythonInVenv = storageConfig.getPythonExecutableInVenv(venvPath)
                     .toAbsolutePath().normalize();
+            if (!Files.exists(pythonInVenv)) {
+                fail(project, venvPath, topic,
+                        "Python introuvable dans le venv : " + pythonInVenv +
+                                " — vérifiez la version Python installée sur le système");
+                return;
+            }
 
-            send(topic, LogMessage.info(projectId, "▶ Mise à jour de pip…"));
+            // ── Étape 2 : Mettre à jour pip ──────────────────────────────────
+            send(project, topic, LogMessage.info(projectId, "▶ Mise à jour de pip…"));
             runCommand(
                     List.of(pythonInVenv.toString(),
                             "-m", "pip", "install", "--upgrade", "pip", "--quiet"),
-                    projectPath, topic, projectId);
+                    projectPath, topic, project);
 
             // ── Étape 3 : Installer requirements.txt ─────────────────────────
             Path requirements = projectPath.resolve("requirements.txt");
             if (Files.exists(requirements)) {
-                send(topic, LogMessage.info(projectId,
+                send(project, topic, LogMessage.info(projectId,
                         "▶ Installation de requirements.txt…"));
+                send(project, topic, LogMessage.info(projectId,
+                        "  Fichier : " + requirements));
 
                 rc = runCommand(
                         List.of(pythonInVenv.toString(),
                                 "-m", "pip", "install", "-r", requirements.toString()),
-                        projectPath, topic, projectId);
+                        projectPath, topic, project);
 
                 if (rc != 0) {
                     fail(project, venvPath, topic,
-                            "Échec pip install -r requirements.txt (exit " + rc + ")");
+                            "Échec pip install -r requirements.txt (exit " + rc + ") — " +
+                                    "Vérifiez le contenu du fichier requirements.txt et " +
+                                    "la connexion internet du serveur");
                     return;
                 }
-                send(topic, LogMessage.success(projectId, "✔ Dépendances installées"));
+                send(project, topic, LogMessage.success(projectId,
+                        "✔ Dépendances installées"));
             } else {
-                send(topic, LogMessage.warn(projectId,
-                        "⚠ Aucun requirements.txt trouvé — venv vide"));
+                send(project, topic, LogMessage.warn(projectId,
+                        "⚠ Aucun requirements.txt trouvé dans : " + projectPath +
+                                " — le venv sera vide, les tests risquent d'échouer"));
             }
 
             // ── Étape 4 : Détecter pabot ─────────────────────────────────────
             boolean hasPabot = Files.exists(
                     storageConfig.getPabotExecutable(venvPath).toAbsolutePath().normalize());
             if (hasPabot) {
-                send(topic, LogMessage.info(projectId,
-                        "ℹ pabot détecté — exécution parallèle disponible"));
+                send(project, topic, LogMessage.info(projectId,
+                        "✔ pabot détecté — exécution parallèle disponible"));
+            } else {
+                send(project, topic, LogMessage.info(projectId,
+                        "ℹ pabot non détecté — exécution séquentielle (robot)"));
             }
 
             // ── Finalisation ─────────────────────────────────────────────────
@@ -123,7 +147,7 @@ public class VenvSetupService {
             project.setVenvError(null);
             projectRepository.save(project);
 
-            send(topic, LogMessage.success(projectId,
+            send(project, topic, LogMessage.success(projectId,
                     "══ Venv prêt — le projet peut être exécuté ══"));
 
         } catch (Exception e) {
@@ -132,43 +156,63 @@ public class VenvSetupService {
         }
     }
 
-    /**
-     * Relance le setup (utile si requirements.txt a changé).
-     */
     @Async
     public void reinstallAsync(Long projectId) {
         TestProject project = projectRepository.findById(projectId)
                 .orElseThrow(() -> new RuntimeException("Projet introuvable : " + projectId));
 
-        // Supprimer le venv existant
         if (project.getVenvPath() != null) {
-            try {
-                deleteDir(Path.of(project.getVenvPath()));
-            } catch (IOException e) {
-                log.warn("Impossible de supprimer le venv : {}", e.getMessage());
-            }
+            try { deleteDir(Path.of(project.getVenvPath())); }
+            catch (IOException e) { log.warn("Impossible de supprimer le venv : {}", e.getMessage()); }
         }
         project.setVenvStatus(VenvStatus.NONE);
         project.setVenvPath(null);
+        project.setVenvError(null);
         projectRepository.save(project);
 
         setupAsync(projectId);
     }
 
-    // ── Privé ───────────────────────────────────────────────────────────────
+    /**
+     * Retourne les logs persistés du dernier setup.
+     * Appelé par le frontend au montage de l'onglet "Setup venv".
+     */
+    public List<LogMessage> getSetupLogs(Long projectId) {
+        return setupLogRepository.findByProjectIdOrderByIdAsc(projectId)
+                .stream()
+                .map(l -> LogMessage.builder()
+                        .sourceId(projectId)
+                        .text(l.getText())
+                        .level(l.getLevel())
+                        .timestamp(l.getTimestamp())
+                        .build())
+                .toList();
+    }
+
+    // ── Privé ────────────────────────────────────────────────────────────────
 
     /**
-     * Exécute une commande et streame sa sortie ligne par ligne.
-     * Retourne le code de retour du processus.
+     * Envoie un log via WebSocket ET le persiste en base.
      */
-    private int runCommand(List<String> command, Path workDir,
-                           String topic, Long projectId) throws IOException, InterruptedException {
+    private void send(TestProject project, String topic, LogMessage msg) {
+        messaging.convertAndSend(topic, msg);
+        try {
+            setupLogRepository.save(SetupLog.builder()
+                    .project(project)
+                    .text(msg.getText() != null ? msg.getText() : "")
+                    .level(msg.getLevel())
+                    .timestamp(msg.getTimestamp() != null
+                            ? msg.getTimestamp() : LocalDateTime.now())
+                    .build());
+        } catch (Exception e) {
+            log.warn("Log setup non persisté : {}", e.getMessage());
+        }
+    }
 
-        // Normaliser le workDir en chemin absolu (cross-platform Windows + Linux/Docker)
-        // Pas de cmd /c — les commandes passées utilisent déjà des chemins absolus :
-        //   python3 -m venv /abs/path/venv
-        //   /abs/path/venv/Scripts/pip.exe install ...   (Windows)
-        //   /abs/path/venv/bin/pip install ...           (Linux/Docker)
+    private int runCommand(List<String> command, Path workDir,
+                           String topic, TestProject project)
+            throws IOException, InterruptedException {
+
         Path absoluteWorkDir = workDir.toAbsolutePath().normalize();
 
         ProcessBuilder pb = new ProcessBuilder(command);
@@ -183,10 +227,21 @@ public class VenvSetupService {
             while ((line = reader.readLine()) != null) {
                 String trimmed = line.trim();
                 if (trimmed.isEmpty()) continue;
-                LogMessage msg = trimmed.toLowerCase().contains("error")
-                        ? LogMessage.error(projectId, trimmed)
-                        : LogMessage.info(projectId, trimmed);
-                send(topic, msg);
+
+                // Catégoriser selon le contenu
+                LogMessage msg;
+                String lower = trimmed.toLowerCase();
+                if (lower.contains("error") || lower.contains("failed") ||
+                        lower.contains("could not")) {
+                    msg = LogMessage.error(project.getId(), trimmed);
+                } else if (lower.contains("warning") || lower.contains("warn")) {
+                    msg = LogMessage.warn(project.getId(), trimmed);
+                } else if (lower.contains("successfully") || lower.contains("installed")) {
+                    msg = LogMessage.success(project.getId(), trimmed);
+                } else {
+                    msg = LogMessage.info(project.getId(), trimmed);
+                }
+                send(project, topic, msg);
             }
         }
 
@@ -199,16 +254,16 @@ public class VenvSetupService {
     }
 
     private void fail(TestProject project, Path venvPath, String topic, String reason) {
-        send(topic, LogMessage.error(project.getId(), "✘ " + reason));
+        send(project, topic, LogMessage.error(project.getId(), "✘ " + reason));
+        send(project, topic, LogMessage.system(project.getId(),
+                "══ Installation échouée — consultez les logs ci-dessus ══"));
+
         project.setVenvStatus(VenvStatus.ERROR);
         project.setVenvError(reason);
         projectRepository.save(project);
+
         // Nettoyer le venv partiel
         try { deleteDir(venvPath); } catch (IOException ignored) {}
-    }
-
-    private void send(String topic, LogMessage msg) {
-        messaging.convertAndSend(topic, msg);
     }
 
     private void deleteDir(Path dir) throws IOException {
