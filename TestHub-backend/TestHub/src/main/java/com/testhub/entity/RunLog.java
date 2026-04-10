@@ -6,8 +6,14 @@ import lombok.*;
 
 import java.time.LocalDateTime;
 
+/**
+ * Persiste chaque ligne de log d'un run.
+ * Permet de recharger l'historique des logs même après la fin du run.
+ */
 @Entity
-@Table(name = "run_log")
+@Table(name = "run_log", indexes = {
+        @Index(name = "idx_run_log_run_id", columnList = "run_id")
+})
 @Getter @Setter
 @NoArgsConstructor @AllArgsConstructor
 @Builder
@@ -25,6 +31,7 @@ public class RunLog {
     private String text;
 
     @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
     private LogMessage.Level level;
 
     @Column(nullable = false, updatable = false)
@@ -32,6 +39,6 @@ public class RunLog {
 
     @PrePersist
     protected void onCreate() {
-        timestamp = LocalDateTime.now();
+        if (timestamp == null) timestamp = LocalDateTime.now();
     }
 }

@@ -21,22 +21,11 @@ public class TestRunController {
 
     private final ExecutionService  executionService;
     private final TestRunRepository runRepository;
-    private final RunLogRepository runLogRepository;
+    private final RunLogRepository  runLogRepository; // ← injection correcte ✅
 
     /**
      * POST /api/runs
      * Lance une exécution. Retourne immédiatement avec status=PENDING.
-     * Les logs arrivent ensuite via WebSocket : /topic/runs/{id}/logs
-     *
-     * Body :
-     * {
-     *   "projectId": 1,
-     *   "mode": "SINGLE_TEST",
-     *   "target": "Tests/login.robot::Login Valide",
-     *   "label": "Login Valide",        ← optionnel
-     *   "forcePabot": false,             ← optionnel
-     *   "processes": 2                   ← optionnel, pour pabot
-     * }
      */
     @PostMapping
     public ResponseEntity<TestRunDto.Response> launch(
@@ -60,13 +49,31 @@ public class TestRunController {
     /**
      * GET /api/runs/{id}
      * Détail d'un run (statut, résultats, durée…).
-     * Le frontend poll cet endpoint pour mettre à jour l'UI après l'exécution.
      */
     @GetMapping("/{id}")
     public ResponseEntity<TestRunDto.Response> findById(@PathVariable Long id) {
         TestRun run = runRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Run introuvable : id=" + id));
         return ResponseEntity.ok(executionService.toResponse(run));
+    }
+
+    /**
+     * GET /api/runs/{id}/logs
+     * Retourne les logs persistés d'un run.
+     * Appelé au montage de RunDetail pour afficher les logs même après la fin du run.
+     */
+    @GetMapping("/{id}/logs")
+    public ResponseEntity<List<LogMessage>> getLogs(@PathVariable Long id) {
+        List<LogMessage> logs = runLogRepository.findByRunIdOrderByIdAsc(id)
+                .stream()
+                .map(l -> LogMessage.builder()
+                        .sourceId(id)
+                        .text(l.getText())
+                        .level(l.getLevel())
+                        .timestamp(l.getTimestamp())
+                        .build())
+                .collect(Collectors.toList());
+        return ResponseEntity.ok(logs);
     }
 
     /**
@@ -82,19 +89,5 @@ public class TestRunController {
                 .map(executionService::toResponse)
                 .collect(Collectors.toList());
         return ResponseEntity.ok(runs);
-    }
-
-    @GetMapping("/{id}/logs")
-    public ResponseEntity<List<LogMessage>> getLogs(@PathVariable Long id) {
-        List<LogMessage> logs = runLogRepository.findByRunIdOrderById(id)
-                .stream()
-                .map(l -> LogMessage.builder()
-                        .sourceId(id)
-                        .text(l.getText())
-                        .level(l.getLevel())
-                        .timestamp(l.getTimestamp())
-                        .build())
-                .collect(Collectors.toList());
-        return ResponseEntity.ok(logs);
     }
 }
