@@ -22,9 +22,8 @@ import ArticleIcon from '@mui/icons-material/Article';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import { DataGrid } from '@mui/x-data-grid';
 import { projectApi, runApi } from '../api/client';
-import { useWebSocket } from '../hooks/useWebSocket';
 import StatusChip from '../components/StatusChip';
-import Terminal from '../components/Terminal';
+import SetupVenvTab from '../components/SetupVenvTab';
 
 function fmtDate(dt) {
   if (!dt) return '—';
@@ -38,14 +37,14 @@ export default function ProjectDetail() {
   const { id }   = useParams();
   const navigate = useNavigate();
 
-  const [project,   setProject]   = useState(null);
-  const [tree,      setTree]      = useState(null);
-  const [runs,      setRuns]      = useState([]);
-  const [tab,       setTab]       = useState(0);
-  const [selected,  setSelected]  = useState(null);
-  const [expanded,  setExpanded]  = useState({});
-  const [launching, setLaunching] = useState(false);
-  const [setupLogs, setSetupLogs] = useState([]);
+  const [project,      setProject]      = useState(null);
+  const [tree,         setTree]         = useState(null);
+  const [runs,         setRuns]         = useState([]);
+  const [tab,          setTab]          = useState(0);
+  const [selected,     setSelected]     = useState(null);
+  const [expanded,     setExpanded]     = useState({});
+  const [launching,    setLaunching]    = useState(false);
+  const [reinstalling, setReinstalling] = useState(false);
 
   const load = useCallback(() => {
     Promise.all([
@@ -60,13 +59,12 @@ export default function ProjectDetail() {
 
   useEffect(() => { load(); }, [load]);
 
-  useWebSocket(
-    project?.venvStatus === 'INSTALLING' ? `/topic/projects/${id}/setup` : null,
-    useCallback(msg => {
-      setSetupLogs(prev => [...prev, msg]);
-      if (msg.level === 'SUCCESS' || msg.level === 'ERROR') setTimeout(load, 600);
-    }, [load])
-  );
+  // Polling si venv en cours d'installation
+  useEffect(() => {
+    if (project?.venvStatus !== 'INSTALLING') return;
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
+  }, [project?.venvStatus, load]);
 
   const handleLaunch = async () => {
     setLaunching(true);
@@ -94,15 +92,28 @@ export default function ProjectDetail() {
     }
   };
 
+  // Partagé entre l'IconButton du header ET le bouton dans SetupVenvTab
+  const handleReinstall = async () => {
+    setReinstalling(true);
+    try {
+      await projectApi.reinstallVenv(id);
+      setTab(2);
+      load();
+    } catch (e) {
+      console.error('Erreur réinstallation venv:', e);
+    } finally {
+      setReinstalling(false);
+    }
+  };
+
   const toggle = (path) => setExpanded(p => ({ ...p, [path]: !p[path] }));
 
-  // Colonnes DataGrid pour les runs
   const runColumns = [
-    { field: 'id',     headerName: '#', width: 60,
+    { field: 'id', headerName: '#', width: 60,
       renderCell: p => <Typography variant="caption" sx={{ fontFamily: 'monospace' }}>#{p.value}</Typography> },
-    { field: 'label',  headerName: 'Label', flex: 1,
+    { field: 'label', headerName: 'Label', flex: 1,
       renderCell: p => <Typography variant="body2" fontWeight={600}>{p.value}</Typography> },
-    { field: 'mode',   headerName: 'Mode', width: 110,
+    { field: 'mode', headerName: 'Mode', width: 110,
       renderCell: p => <Chip label={p.value} size="small" variant="outlined" sx={{ fontSize: 10 }} /> },
     { field: 'status', headerName: 'Statut', width: 120,
       renderCell: p => <StatusChip status={p.value} /> },
@@ -146,14 +157,15 @@ export default function ProjectDetail() {
           )}
         </Box>
         <Stack direction="row" spacing={1}>
+          {/* IconButton refresh — disabled + spinner pendant la réinstallation */}
           <Tooltip title="Réinstaller le venv">
-            <IconButton onClick={() => {
-              projectApi.reinstallVenv(id);
-              setSetupLogs([]);
-              setTab(2);
-            }}>
-              <RefreshIcon />
-            </IconButton>
+            <span>
+              <IconButton onClick={handleReinstall} disabled={reinstalling}>
+                {reinstalling
+                  ? <CircularProgress size={20} />
+                  : <RefreshIcon />}
+              </IconButton>
+            </span>
           </Tooltip>
           <Button
             variant="contained" startIcon={<PlayArrowIcon />}
@@ -201,7 +213,7 @@ export default function ProjectDetail() {
         </Tabs>
       </Paper>
 
-      {/* ── Fichiers ──────────────────────────────────────────── */}
+      {/* ── Fichiers ─────────────────────────────────────────── */}
       {tab === 0 && (
         <Grid container spacing={2}>
           <Grid item xs={12} md={8}>
@@ -225,7 +237,6 @@ export default function ProjectDetail() {
                   </Box>
                 ) : tree.files.map(file => (
                   <Box key={file.relativePath}>
-                    {/* Fichier */}
                     <Box
                       onClick={() => {
                         toggle(file.relativePath);
@@ -252,7 +263,6 @@ export default function ProjectDetail() {
                         sx={{ fontSize: 10, height: 20 }} />
                     </Box>
 
-                    {/* Test cases */}
                     {expanded[file.relativePath] && file.testCases.map(tc => (
                       <Box
                         key={tc.name}
@@ -317,7 +327,6 @@ export default function ProjectDetail() {
                   </Button>
                 </Box>
               )}
-
               <Button
                 variant="contained" fullWidth startIcon={<PlayArrowIcon />}
                 onClick={handleLaunch} sx={{ mt: 2 }}
@@ -326,7 +335,6 @@ export default function ProjectDetail() {
                 {launching ? <CircularProgress size={16} sx={{ mr: 1 }} /> : null}
                 Lancer
               </Button>
-
               {project.venvStatus !== 'READY' && (
                 <Alert severity="warning" sx={{ mt: 2, fontSize: 12 }}>
                   Venv non prêt ({project.venvStatus})
@@ -337,7 +345,7 @@ export default function ProjectDetail() {
         </Grid>
       )}
 
-      {/* ── Runs ──────────────────────────────────────────────── */}
+      {/* ── Runs ─────────────────────────────────────────────── */}
       {tab === 1 && (
         <Paper sx={{ height: 500 }}>
           <DataGrid
@@ -356,24 +364,13 @@ export default function ProjectDetail() {
         </Paper>
       )}
 
-      {/* ── Setup venv ────────────────────────────────────────── */}
+      {/* ── Setup venv ───────────────────────────────────────── */}
       {tab === 2 && (
-        <Box>
-          <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }}>
-            <Typography variant="subtitle2">Installation du venv</Typography>
-            <StatusChip status={project.venvStatus} />
-            {project.venvStatus === 'ERROR' && (
-              <Button size="small" startIcon={<RefreshIcon />} variant="outlined"
-                onClick={() => { projectApi.reinstallVenv(id); setSetupLogs([]); }}>
-                Relancer
-              </Button>
-            )}
-          </Stack>
-          <Terminal logs={setupLogs} height={500} title={`venv — ${project.name}`} />
-          {project.venvError && (
-            <Alert severity="error" sx={{ mt: 2 }}>{project.venvError}</Alert>
-          )}
-        </Box>
+        <SetupVenvTab
+          project={project}
+          projectId={id}
+          onReinstall={handleReinstall}
+        />
       )}
     </Box>
   );

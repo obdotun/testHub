@@ -1,5 +1,6 @@
 package com.testhub.entity;
 
+import com.testhub.enums.ProjectSource;
 import com.testhub.enums.VenvStatus;
 import jakarta.persistence.*;
 import lombok.*;
@@ -9,16 +10,17 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Un projet correspond à un ZIP uploadé, extrait dans storage/projects/{id}/.
- * Chaque projet possède son propre venv Python isolé.
+ * Un projet peut être créé de deux façons :
+ *   - ZIP uploadé        (source = ZIP)
+ *   - Clone Bitbucket    (source = GIT)
  *
- * Structure attendue dans le ZIP :
- *   Tests/          → fichiers .robot (test cases)
- *   Resources/      → keywords et resources partagés
- *   Variables/      → fichiers de variables
- *   Libraries/      → librairies custom
+ * Structure attendue :
+ *   Tests/           → fichiers .robot
+ *   Resources/       → keywords partagés
+ *   Variables/       → fichiers de variables
+ *   Libraries/       → librairies custom
  *   requirements.txt
- *   .env            → variables d'environnement (optionnel)
+ *   .env             → variables d'environnement (optionnel)
  */
 @Entity
 @Table(name = "test_project")
@@ -37,55 +39,64 @@ public class TestProject {
     @Column(length = 500)
     private String description;
 
-    /** Chemin absolu du dossier extrait sur le serveur */
+    /** Chemin absolu du dossier du projet sur le serveur */
     @Column(nullable = false)
     private String storagePath;
 
-    /** Nom du ZIP original uploadé */
+    // ── Source du projet ─────────────────────────────────────────────────────
+
+    /** ZIP ou GIT */
+    @Enumerated(EnumType.STRING)
+    @Builder.Default
+    private ProjectSource source = ProjectSource.ZIP;
+
+    /** Nom du ZIP original (si source = ZIP) */
     private String originalZipName;
 
-    // ── Venv ────────────────────────────────────────────────────────────────
+    /** URL du repo Bitbucket (si source = GIT) */
+    @Column(length = 1000)
+    private String repositoryUrl;
 
-    /** État du venv de ce projet */
+    /** Branche clonée (si source = GIT) */
+    @Builder.Default
+    private String branch = "main";
+
+    /** Dernier commit cloné */
+    private String lastCommit;
+
+    /** Date du dernier pull */
+    private LocalDateTime lastPulledAt;
+
+    // ── Venv ─────────────────────────────────────────────────────────────────
+
     @Enumerated(EnumType.STRING)
     @Builder.Default
     private VenvStatus venvStatus = VenvStatus.NONE;
 
-    /** Chemin absolu du venv : {storagePath}/venv */
     private String venvPath;
 
-    /** Date de création/dernière installation du venv */
     private LocalDateTime venvCreatedAt;
 
-    /** Dernière erreur lors du setup venv */
     @Column(length = 2000)
     private String venvError;
 
-    // ── Exécution ───────────────────────────────────────────────────────────
+    // ── Exécution ─────────────────────────────────────────────────────────────
 
-    /**
-     * Si true → utilise pabot (parallèle) au lieu de robot.
-     * Détecté automatiquement si "robotframework-pabot" est dans requirements.txt.
-     */
     @Builder.Default
     private boolean usesPabot = false;
 
-    /**
-     * Dossier contenant les suites à exécuter.
-     * Par convention : "Tests" — peut être surchargé.
-     */
     @Column(nullable = false)
     @Builder.Default
     private String testsDir = "Tests";
 
-    // ── Métadonnées ─────────────────────────────────────────────────────────
+    // ── Métadonnées ───────────────────────────────────────────────────────────
 
     @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;
 
     private LocalDateTime updatedAt;
 
-    // ── Relations ───────────────────────────────────────────────────────────
+    // ── Relations ─────────────────────────────────────────────────────────────
 
     @OneToMany(mappedBy = "project", cascade = CascadeType.ALL, orphanRemoval = true)
     @Builder.Default
