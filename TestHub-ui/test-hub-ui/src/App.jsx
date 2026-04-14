@@ -1,37 +1,47 @@
-import React, { useState, useEffect } from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import {ThemeProvider} from '@mui/material/styles';
-import CssBaseline from '@mui/material/CssBaseline';
-import theme from './theme/theme';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider } from './context/AuthContext';
+import ProtectedRoute from './components/ProtectedRoute';
+import LoginPage from './pages/LoginPage';
+import ChangePasswordPage from './pages/ChangePasswordPage';
 import AppLayout from './components/AppLayout';
-import Dashboard     from './pages/Dashboard';
-import Projects      from './pages/Projects';
+import Dashboard from './pages/Dashboard';
+import Projects from './pages/Projects';
 import ProjectDetail from './pages/ProjectDetail';
-import Runs          from './pages/Runs';
-import RunDetail     from './pages/RunDetail';
-import { projectApi } from './api/client';
+import RunDetail from './pages/RunDetail';
+import Runs from './pages/Runs';
+import UsersPage from './pages/UsersPage';
 
 export default function App() {
-  const [projects, setProjects] = useState([]);
-
-  useEffect(() => {
-    projectApi.getAll().then(setProjects).catch(() => {});
-  }, []);
-
   return (
-    <ThemeProvider theme={theme}>
-      <CssBaseline />
+    <AuthProvider>
       <BrowserRouter>
-        <AppLayout projects={projects}>
-          <Routes>
-            <Route path="/"             element={<Dashboard />} />
-            <Route path="/projects"     element={<Projects onProjectsChange={setProjects} />} />
-            <Route path="/projects/:id" element={<ProjectDetail />} />
-            <Route path="/runs"         element={<Runs />} />
-            <Route path="/runs/:id"     element={<RunDetail />} />
-          </Routes>
-        </AppLayout>
+        <Routes>
+          {/* ── Pages publiques ────────────────────────────────────────── */}
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/change-password" element={<ChangePasswordPage />} />
+
+          {/* ── Pages protégées ────────────────────────────────────────── */}
+          <Route path="/" element={
+            <ProtectedRoute>
+              <AppLayout />
+            </ProtectedRoute>
+          }>
+            <Route index element={<Navigate to="/dashboard" replace />} />
+            <Route path="dashboard"      element={<Dashboard />} />
+            <Route path="projects"       element={<Projects />} />
+            <Route path="projects/:id"   element={<ProjectDetail />} />
+            <Route path="runs"           element={<Runs />} />
+            <Route path="runs/:id"       element={<RunDetail />} />
+
+            {/* ── ADMIN seulement ──────────────────────────────────────── */}
+            <Route path="users" element={
+              <ProtectedRoute minimumRole="ADMIN">
+                <UsersPage />
+              </ProtectedRoute>
+            } />
+          </Route>
+        </Routes>
       </BrowserRouter>
-    </ThemeProvider>
+    </AuthProvider>
   );
 }

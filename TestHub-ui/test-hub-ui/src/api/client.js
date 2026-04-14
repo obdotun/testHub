@@ -1,10 +1,26 @@
 const BASE = '/api';
 
+const TOKEN_KEY = 'testhub_token';
+ 
 async function request(path, options = {}) {
-  const res = await fetch(BASE + path, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
+  const token = localStorage.getItem(TOKEN_KEY);
+ 
+  const res = await fetch('/api' + path, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+      ...options.headers,
+    },
     ...options,
   });
+ 
+  if (res.status === 401) {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem('testhub_user');
+    window.location.href = '/login';
+    return;
+  }
+ 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: res.statusText }));
     throw Object.assign(
@@ -12,6 +28,7 @@ async function request(path, options = {}) {
       { status: res.status, data: err }
     );
   }
+ 
   return res.status === 204 ? null : res.json();
 }
 

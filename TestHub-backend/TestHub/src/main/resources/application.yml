@@ -53,3 +53,10 @@ robot:
     timeout-seconds: 600
     # Dossiers à exclure lors de l'extraction du ZIP
     excluded-dirs: venv,__pycache__,Results,pabot_results,.git,node_modules
+
+# ── Configuration spécifique à la plateforme ────────────────────────────────
+testhub:
+  jwt:
+    # Minimum 32 caractères — changez cette valeur en production !
+    secret: TestHub@SecretKey#2026$WebbFontaine!CI
+    expiration-hours: 8  # token valide 8h (journée de travail)
