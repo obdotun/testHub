@@ -36,7 +36,7 @@ public class AppUser {
     private String fullName;
 
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false)
+    @Column(nullable = false, columnDefinition = "varchar(50)")
     @Builder.Default
     private Role role = Role.VIEWER;
 

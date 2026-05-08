@@ -13,22 +13,6 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
-/**
- * Configuration Spring Security.
- *
- * Hiérarchie des rôles :
- *   VIEWER < QA_ENGINEER < QA_LEAD < ADMIN
- *
- * Règles d'accès par endpoint :
- *   POST /api/auth/login           → public
- *   GET  /api/auth/me              → authentifié
- *   POST /api/auth/change-password → authentifié
- *   GET  /api/projects             → tout rôle
- *   POST /api/projects             → QA_LEAD+
- *   POST /api/runs                 → QA_ENGINEER+
- *   /api/users/**                  → ADMIN seulement
- *   /ws/**                         → public (géré par STOMP)
- */
 @Configuration
 @EnableWebSecurity
 @EnableMethodSecurity
@@ -47,14 +31,22 @@ public class SecurityConfig {
 
                         // ── Public ───────────────────────────────────────────────
                         .requestMatchers("/api/auth/login").permitAll()
-                        .requestMatchers("/ws/**").permitAll()         // WebSocket
-                        .requestMatchers("/h2-console/**").permitAll() // dev only
+                        .requestMatchers("/ws/**").permitAll()
+                        .requestMatchers("/h2-console/**").permitAll()
+                        .requestMatchers("/actuator/health").permitAll()
 
-                        // ── Admin seulement ───────────────────────────────────────
+                        // ── Reports publics ───────────────────────────────────────
+                        // permitAll car :
+                        //   1. Les iframes et images ne peuvent pas envoyer de headers Auth
+                        //   2. Le runId est une protection implicite suffisante
+                        //   3. Les rapports sont des fichiers statiques générés
+                        .requestMatchers(HttpMethod.GET, "/api/reports/**").permitAll()
+
+                        // ── ADMIN seulement ───────────────────────────────────────
                         .requestMatchers("/api/users/**").hasRole("ADMIN")
 
                         // ── QA_LEAD et au-dessus ──────────────────────────────────
-                        .requestMatchers(HttpMethod.POST, "/api/projects/**").hasAnyRole(
+                        .requestMatchers(HttpMethod.POST,   "/api/projects/**").hasAnyRole(
                                 "QA_LEAD", "ADMIN")
                         .requestMatchers(HttpMethod.DELETE, "/api/projects/**").hasAnyRole(
                                 "QA_LEAD", "ADMIN")
@@ -68,8 +60,6 @@ public class SecurityConfig {
                 )
                 .addFilterBefore(jwtAuthFilter,
                         UsernamePasswordAuthenticationFilter.class)
-
-                // H2 console (dev)
                 .headers(h -> h.frameOptions(fo -> fo.disable()));
 
         return http.build();

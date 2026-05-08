@@ -1,11 +1,11 @@
-const BASE = '/api';
-
+const BASE      = '/api';
 const TOKEN_KEY = 'testhub_token';
- 
+const USER_KEY  = 'testhub_user';
+
 async function request(path, options = {}) {
   const token = localStorage.getItem(TOKEN_KEY);
- 
-  const res = await fetch('/api' + path, {
+
+  const res = await fetch(BASE + path, {
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
@@ -13,14 +13,15 @@ async function request(path, options = {}) {
     },
     ...options,
   });
- 
+
+  // Token expiré ou invalide → rediriger vers /login
   if (res.status === 401) {
     localStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem('testhub_user');
+    localStorage.removeItem(USER_KEY);
     window.location.href = '/login';
     return;
   }
- 
+
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: res.statusText }));
     throw Object.assign(
@@ -28,18 +29,21 @@ async function request(path, options = {}) {
       { status: res.status, data: err }
     );
   }
- 
+
   return res.status === 204 ? null : res.json();
 }
 
 export const projectApi = {
 
-  getAll:   () => request('/projects'),
-  getById:  (id) => request(`/projects/${id}`),
-  getFiles: (id) => request(`/projects/${id}/files`),
-  delete:   (id) => request(`/projects/${id}`, { method: 'DELETE' }),
-  reindex:  (id) => request(`/projects/${id}/reindex`, { method: 'POST' }),
+  getAll:        ()   => request('/projects'),
+  getById:       (id) => request(`/projects/${id}`),
+  getFiles:      (id) => request(`/projects/${id}/files`),
+  delete:        (id) => request(`/projects/${id}`, { method: 'DELETE' }),
+  reindex:       (id) => request(`/projects/${id}/reindex`,      { method: 'POST' }),
   reinstallVenv: (id) => request(`/projects/${id}/reinstall-venv`, { method: 'POST' }),
+
+  /** Logs persistés du setup venv — avec token ✅ */
+  getSetupLogs: (id) => request(`/projects/${id}/setup-logs`),
 
   /** Création via ZIP (multipart) */
   createFromZip: (name, description, testsDir, zipFile) => {
@@ -58,11 +62,7 @@ export const projectApi = {
       body: JSON.stringify(payload),
     }),
 
-  /**
-   * Récupère la liste des branches d'un repo Bitbucket.
-   * Utilise git ls-remote — ne clone pas le repo.
-   * @returns {Promise<string[]>} ex: ["main", "develop", "TRN", "UAT"]
-   */
+  /** Récupère la liste des branches d'un repo Bitbucket */
   listBranches: (repositoryUrl, username, appPassword) =>
     request('/projects/git/branches', {
       method: 'POST',
@@ -81,14 +81,23 @@ export const runApi = {
   getAll:       ()          => request('/runs'),
   getById:      (id)        => request(`/runs/${id}`),
   getByProject: (projectId) => request(`/runs/by-project/${projectId}`),
-  launch:       (payload)   => request('/runs', {
+
+  /** Logs persistés d'un run — avec token ✅ */
+  getLogs: (id) => request(`/runs/${id}/logs`),
+
+  launch: (payload) => request('/runs', {
     method: 'POST',
     body: JSON.stringify(payload),
   }),
 };
 
+/**
+ * URLs des rapports Robot Framework.
+ * Reports en permitAll côté Spring Security — pas besoin du token.
+ * Mais on le passe quand même pour compatibilité future.
+ */
 export const reportUrl = {
-  report: (runId) => `/api/reports/${runId}/report`,
-  log:    (runId) => `/api/reports/${runId}/log`,
-  output: (runId) => `/api/reports/${runId}/output`,
+  report: (runId) => `${BASE}/reports/${runId}/report`,
+  log:    (runId) => `${BASE}/reports/${runId}/log`,
+  output: (runId) => `${BASE}/reports/${runId}/output`,
 };

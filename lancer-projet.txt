@@ -1,0 +1,10 @@
+# 1. Copier et configurer les variables
+cp .env.example .env
+# Editer .env : changer JWT_SECRET et POSTGRES_PASSWORD
+
+# 2. Builder et démarrer
+docker-compose up -d --build
+
+# 3. Vérifier
+docker-compose ps
+docker-compose logs -f backend

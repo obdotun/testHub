@@ -20,7 +20,11 @@ import java.util.List;
 
 /**
  * Filtre JWT — intercepte chaque requête HTTP et valide le token.
- * Si valide → injecte l'utilisateur dans le SecurityContext.
+ *
+ * Le token peut être fourni de deux façons :
+ *   1. Header Authorization: Bearer {token}  → requêtes API normales
+ *   2. Query param ?token={token}            → iframes (report.html, log.html)
+ *      car les iframes ne peuvent pas envoyer de headers HTTP custom.
  */
 @Slf4j
 @Component
@@ -36,15 +40,12 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                                     FilterChain chain)
             throws ServletException, IOException {
 
-        String authHeader = request.getHeader("Authorization");
+        String token = extractToken(request);
 
-        // Pas de token → laisser passer (Spring Security gérera l'accès)
-        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+        if (token == null) {
             chain.doFilter(request, response);
             return;
         }
-
-        String token = authHeader.substring(7);
 
         if (!jwtService.isValid(token)) {
             chain.doFilter(request, response);
@@ -61,7 +62,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
             return;
         }
 
-        // Injecter dans le SecurityContext avec le préfixe ROLE_ requis par Spring
+        // Injecter dans le SecurityContext
         UsernamePasswordAuthenticationToken auth =
                 new UsernamePasswordAuthenticationToken(
                         username,
@@ -71,5 +72,26 @@ public class JwtAuthFilter extends OncePerRequestFilter {
 
         SecurityContextHolder.getContext().setAuthentication(auth);
         chain.doFilter(request, response);
+    }
+
+    /**
+     * Extrait le token JWT depuis :
+     *   1. Header Authorization: Bearer {token}
+     *   2. Query parameter ?token={token}  (fallback pour les iframes)
+     */
+    private String extractToken(HttpServletRequest request) {
+        // Priorité 1 : header Authorization
+        String authHeader = request.getHeader("Authorization");
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            return authHeader.substring(7);
+        }
+
+        // Priorité 2 : query param (iframes report.html / log.html)
+        String queryToken = request.getParameter("token");
+        if (queryToken != null && !queryToken.isBlank()) {
+            return queryToken;
+        }
+
+        return null;
     }
 }

@@ -30,7 +30,7 @@ public class TestRun {
     private TestProject project;
 
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false)
+    @Column(nullable = false, columnDefinition = "varchar(50)")
     private ExecutionMode mode;
 
     /**
@@ -46,6 +46,7 @@ public class TestRun {
     private String label;
 
     @Enumerated(EnumType.STRING)
+    @Column(columnDefinition = "varchar(50)")
     @Builder.Default
     private RunStatus status = RunStatus.PENDING;
 

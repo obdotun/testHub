@@ -1,4 +1,12 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# application.yml — Configuration de base (développement local)
+# Base de données : H2 (in-file, console activée)
+# ══════════════════════════════════════════════════════════════════════════════
+
 spring:
+#  profiles:
+#    active: dev
+
   application:
     name: TestHub
 
@@ -58,5 +66,10 @@ robot:
 testhub:
   jwt:
     # Minimum 32 caractères — changez cette valeur en production !
-    secret: TestHub@SecretKey#2026$WebbFontaine!CI
+    secret: TestHub@SecretKey#2026$GUCECOTED!VO!R3
     expiration-hours: 8  # token valide 8h (journée de travail)
+
+logging:
+  level:
+    com.testhub: DEBUG
+    org.springframework.security: DEBUG

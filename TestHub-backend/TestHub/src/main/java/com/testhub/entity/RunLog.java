@@ -31,7 +31,7 @@ public class RunLog {
     private String text;
 
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false)
+    @Column(nullable = false,columnDefinition = "varchar(50)")
     private LogMessage.Level level;
 
     @Column(nullable = false, updatable = false)

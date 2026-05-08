@@ -1,0 +1,70 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# application-docker.yml — Profil Docker / Production
+# Base de données : PostgreSQL
+# Activé par : SPRING_PROFILES_ACTIVE=docker
+# ══════════════════════════════════════════════════════════════════════════════
+
+spring:
+  datasource:
+    url: jdbc:postgresql://postgres:5432/testhub
+    driver-class-name: org.postgresql.Driver
+    username: ${POSTGRES_USER:testhub}
+    password: ${POSTGRES_PASSWORD:testhub_secret}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 60000
+      initialization-fail-timeout: 120000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    properties:
+      hibernate:
+        format_sql: false
+        order_inserts: true
+        type:
+          preferred_uuid_jdbc_type: CHAR
+        jdbc:
+          batch_size: 20
+          lob:
+            non_contextual_creation: true
+
+  # H2 console désactivée en production
+  h2:
+    console:
+      enabled: false
+
+robot:
+  storage:
+    projects-dir: /app/storage/projects
+    reports-dir: /app/storage/reports
+  python:
+    executable: python3   # Linux dans le conteneur
+  execution:
+    timeout-seconds: 600
+    excluded-dirs: venv,__pycache__,Results,pabot_results,.git,node_modules
+
+testhub:
+  jwt:
+    secret: ${TESTHUB_JWT_SECRET:TestHub@SecretKey#Docker$GUCECOTED!VO!RE2026}
+    expiration-hours: 8
+
+logging:
+  level:
+    com.testhub: INFO
+    org.springframework.security: WARN
+    org.hibernate: WARN
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never

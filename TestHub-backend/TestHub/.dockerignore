@@ -1,0 +1,10 @@
+# Backend .dockerignore
+target/
+*.iml
+.idea/
+.git/
+.gitignore
+*.md
+storage/
+data/
+logs/

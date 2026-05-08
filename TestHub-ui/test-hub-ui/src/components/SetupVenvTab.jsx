@@ -7,6 +7,7 @@ import Typography from '@mui/material/Typography';
 import CircularProgress from '@mui/material/CircularProgress';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { projectApi } from '../api/client';
 import StatusChip from './StatusChip';
 import Terminal from './Terminal';
 
@@ -18,15 +19,17 @@ export default function SetupVenvTab({ project, projectId, onReinstall }) {
   const isInstalling = project?.venvStatus === 'INSTALLING';
 
   // ── Charger les logs persistés au montage ────────────────────────────────
-  useEffect(() => {
-    fetch(`/api/projects/${projectId}/setup-logs`)
-      .then(r => r.json())
+  // ✅ Utilise projectApi.getSetupLogs qui envoie le token automatiquement
+  const loadLogs = useCallback(() => {
+    projectApi.getSetupLogs(projectId)
       .then(data => {
         if (Array.isArray(data)) setLogs(data);
         setLogsLoaded(true);
       })
       .catch(() => setLogsLoaded(true));
   }, [projectId]);
+
+  useEffect(() => { loadLogs(); }, [loadLogs]);
 
   // ── WebSocket — logs temps réel pendant l'installation ───────────────────
   useWebSocket(
@@ -57,32 +60,25 @@ export default function SetupVenvTab({ project, projectId, onReinstall }) {
 
   return (
     <Box>
-      {/* ── Header ──────────────────────────────────────────────────────── */}
+      {/* Header */}
       <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }}>
         <Typography variant="subtitle2">Installation du venv</Typography>
         <StatusChip status={project?.venvStatus} />
 
-        {/* Bouton Relancer si ERROR ou NONE */}
         {(project?.venvStatus === 'ERROR' || project?.venvStatus === 'NONE') && (
           <Button
-            size="small"
-            variant="outlined"
-            onClick={handleReinstall}
-            disabled={loading}
+            size="small" variant="outlined"
+            onClick={handleReinstall} disabled={loading}
             startIcon={loading ? <CircularProgress size={14} /> : <RefreshIcon />}
           >
             {loading ? 'Lancement…' : "Relancer l'installation"}
           </Button>
         )}
 
-        {/* Bouton Réinstaller si READY */}
         {project?.venvStatus === 'READY' && (
           <Button
-            size="small"
-            variant="outlined"
-            color="warning"
-            onClick={handleReinstall}
-            disabled={loading}
+            size="small" variant="outlined" color="warning"
+            onClick={handleReinstall} disabled={loading}
             startIcon={loading ? <CircularProgress size={14} /> : <RefreshIcon />}
           >
             {loading ? 'Lancement…' : 'Réinstaller'}
@@ -90,7 +86,6 @@ export default function SetupVenvTab({ project, projectId, onReinstall }) {
         )}
       </Stack>
 
-      {/* ── Message d'erreur si venvStatus = ERROR ─────────────────────── */}
       {project?.venvStatus === 'ERROR' && project?.venvError && (
         <Alert severity="error" sx={{ mb: 2, fontFamily: 'monospace', fontSize: 12 }}>
           <strong>Cause de l'échec :</strong><br />
@@ -98,14 +93,12 @@ export default function SetupVenvTab({ project, projectId, onReinstall }) {
         </Alert>
       )}
 
-      {/* ── Message si venv prêt ─────────────────────────────────────────── */}
       {project?.venvStatus === 'READY' && logs.length > 0 && (
         <Alert severity="success" sx={{ mb: 2, fontSize: 12 }}>
           Venv installé avec succès — logs de la dernière installation ci-dessous.
         </Alert>
       )}
 
-      {/* ── Chargement logs ─────────────────────────────────────────────── */}
       {!logsLoaded && (
         <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
           <CircularProgress size={14} />
@@ -115,7 +108,6 @@ export default function SetupVenvTab({ project, projectId, onReinstall }) {
         </Stack>
       )}
 
-      {/* ── Installation en cours ────────────────────────────────────────── */}
       {isInstalling && (
         <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
           <CircularProgress size={14} color="warning" />
@@ -125,7 +117,6 @@ export default function SetupVenvTab({ project, projectId, onReinstall }) {
         </Stack>
       )}
 
-      {/* ── Aucun log disponible ─────────────────────────────────────────── */}
       {logsLoaded && logs.length === 0 && !isInstalling && (
         <Alert severity="info" sx={{ mb: 2 }}>
           {project?.venvStatus === 'NONE'
@@ -134,7 +125,6 @@ export default function SetupVenvTab({ project, projectId, onReinstall }) {
         </Alert>
       )}
 
-      {/* ── Terminal ─────────────────────────────────────────────────────── */}
       {logs.length > 0 && (
         <Terminal
           logs={logs}

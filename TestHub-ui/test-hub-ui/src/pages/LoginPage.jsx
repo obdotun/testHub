@@ -105,10 +105,10 @@ export default function LoginPage() {
           </Button>
         </form>
 
-        <Typography variant="caption" color="text.disabled"
+        {/*<Typography variant="caption" color="text.disabled"
           sx={{ display: 'block', textAlign: 'center', mt: 3 }}>
           Accès réservé — WebbFontaine QA Team
-        </Typography>
+        </Typography>*/}
       </Paper>
     </Box>
   );

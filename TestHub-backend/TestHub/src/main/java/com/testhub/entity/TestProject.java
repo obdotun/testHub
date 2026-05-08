@@ -47,6 +47,7 @@ public class TestProject {
 
     /** ZIP ou GIT */
     @Enumerated(EnumType.STRING)
+    @Column(columnDefinition = "varchar(50)")
     @Builder.Default
     private ProjectSource source = ProjectSource.ZIP;
 
@@ -70,6 +71,7 @@ public class TestProject {
     // ── Venv ─────────────────────────────────────────────────────────────────
 
     @Enumerated(EnumType.STRING)
+    @Column(columnDefinition = "varchar(50)")
     @Builder.Default
     private VenvStatus venvStatus = VenvStatus.NONE;
 
